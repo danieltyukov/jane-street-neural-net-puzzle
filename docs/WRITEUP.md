@@ -3,8 +3,9 @@
 This is the long version of the README. It follows the solves in the order they actually happened,
 wrong turns included, with the details that matter if you want to build the same tools yourself.
 Every number here is printed by `make all` (`build/results.log` has the raw output) and asserted in
-`tests/test_puzzle.py`, except run times and the pass-by-pass log of the slow search in section 12,
-which `nnre order --method search` prints. Spoilers start right away.
+`tests/test_puzzle.py`, with three exceptions: run times and file sizes, the first dictionary attempts
+in section 9 (kept as history), and the pass-by-pass log of the slow search in section 12, which
+`nnre order --method search` prints. Spoilers start right away.
 
 Contents
 
@@ -395,12 +396,13 @@ MD5("bitter lesson") = c7ef65233c40aa32c2b9ace37595fa7c
 
 "bitter" is not in the Google 10,000 list at all, which is why the first attempt failed.
 
-For the repository, the search had to be fast and should not know the answer. [`crack.py`](../src/nnre/hashnet/crack.py)
-takes 30,000 lowercase words from [wordfreq](https://github.com/rspeer/wordfreq) in frequency order
-and tries pairs in *shells*: shell `m` is every pair whose rarer word has rank `m`, in both orders.
-After shell `m`, every pair of the top `m + 1` words has been tried, so common phrases come first
-without choosing a cut-off. "lesson" is word 3112 of the list and "bitter" word 4917 (counting from
-0), so the phrase turns up in shell 4917, after 24.2 million guesses, in a few seconds.
+For the repository, the search had to be fast and should not know the answer.
+[`crack.py`](../src/nnre/hashnet/crack.py) takes 30,000 lowercase words from
+[wordfreq](https://github.com/rspeer/wordfreq) in frequency order and tries pairs in *shells*: shell
+`m` is every pair whose rarer word has rank `m`, in both orders. After shell `m`, every pair of the
+top `m + 1` words has been tried, so common phrases come first without choosing a cut-off. "lesson"
+is word 3112 of the list and "bitter" word 4917 (counting from 0), so the phrase turns up in shell
+4917, after 24.2 million guesses, in a few seconds.
 
 The network agrees: `model("bitter lesson") = 1`, while `Bitter lesson`, `bitter lessons`,
 `bitter  lesson` and `bitter lesson ` all give 0.
@@ -442,8 +444,8 @@ with `map_location`), and `historical_data.csv` with 10,000 rows: `measurement_0
 The shapes split the pieces into 48 `inp` layers (96 x 48), 48 `out` layers (48 x 96) and one final
 layer (1 x 48, piece 85). So the network is 48 residual blocks of width 48 with 96 hidden units,
 then a linear readout. The 48-number vector that flows from block to block, each block adding its
-output to it, is called the *residual stream*. `pred` is the original model's output (correlation 0.940 with `true`, MSE
-0.1065), which turns out to be the key column.
+output to it, is called the *residual stream*. `pred` is the original model's output (correlation
+0.940 with `true`, MSE 0.1065), which turns out to be the key column.
 
 Two sub-problems: which `inp` goes with which `out` (48! ways), and in which order the blocks go
 (48! more).
@@ -472,11 +474,12 @@ In this model every true pair has a clearly *negative* trace:
 - all 2304 pairs: mean -0.25
 - the smallest gap between a true pair and any rival in its row or column: 5.79
 
-Each unit pushes back against the direction it detects, so each block damps the features it
-reads. Picking one `out` per `inp` so that the total score is lowest is the classic assignment
-problem, which the Hungarian algorithm (`scipy.optimize.linear_sum_assignment`) solves exactly; here
-simply taking each row's minimum gives the same matching. Hyunwoo Park's [paper on this puzzle](https://arxiv.org/abs/2602.19845) uses the same
-negative-diagonal structure and relates it to stability conditions during training.
+Per unit, 4,480 of the 4,608 hidden units in true pairs (97%) write against the direction they read,
+so each block damps the features it detects. Picking one `out` per `inp` so that the total score is
+lowest is the classic assignment problem, which the Hungarian algorithm
+(`scipy.optimize.linear_sum_assignment`) solves exactly; here simply taking each row's minimum gives
+the same matching. Hyunwoo Park's [paper on this puzzle](https://arxiv.org/abs/2602.19845) uses the
+same negative-diagonal structure and relates it to stability conditions during training.
 
 ## 12. Ordering the blocks
 
@@ -484,8 +487,8 @@ negative-diagonal structure and relates it to stability conditions during traini
 
 `pred` is what the original model output. The correct order reproduces it to float precision; any
 other order does not. So the mean squared difference between the reassembled model and `pred` is an
-objective whose optimum is known to be (almost) zero. Evaluating it on 1000 of the rows takes under
-20 milliseconds.
+objective whose optimum is known to be (almost) zero. Evaluating it on 1000 of the rows takes 20 to
+30 milliseconds.
 
 ### What was tried first
 
@@ -537,8 +540,8 @@ whenever that lowers the error then needs 330 evaluations, each a forward pass o
 takes 20 to 30 milliseconds, so about ten seconds in all. The biggest outlier is
 the very last block, whose `W_out` is smaller than the five before it, so sorting puts it at
 position 42; the swaps walk it to the end. The error then sits around 1e-4 until the last
-misplaced pair, the blocks that belong at positions 3 and 4, trades places, and drops to 1.6e-14 in
-that one move.
+misplaced pair, the blocks that belong at positions 3 and 4, trades places, and drops to about
+1.6e-14, float64 precision, in that one move.
 
 The norm idea came from looking at the answer, so it is fair to call it hindsight. The search method
 shows the problem is solvable without it. Among the statistics above, `|block(x) - x|` on the raw
@@ -560,11 +563,12 @@ The permutation lists, for each block in order, its `inp` piece then its `out` p
 - Its SHA-256 is the checker's `093be1cf...`.
 - The reassembled network in float64 matches `pred` to 1.6e-6 on all 10,000 rows, not just the
   1000 used for the search. Its MSE against `true` is 0.1065, the same as `pred`'s.
-- The `Block` and `LastLayer` classes from the puzzle page, loaded with `torch.load(weights_only=True)`
-  and run in float32, match `pred` to 4.8e-7. That is closer than the float64 replay because `pred`
-  was itself computed in float32 (the CSV stores it with float32 precision). The remaining gap is a
-  few float32 rounding steps; the pieces were saved from a GPU, so `pred` was most likely computed
-  there, where sums are added up in a different order.
+- The `Block` and `LastLayer` classes from the puzzle page, loaded with
+  `torch.load(weights_only=True)` and run in float32, match `pred` to about 5e-7 (4.8e-7 on one
+  machine, 4.9e-7 on GitHub's CI runners: float32 rounding depends on the CPU). That is closer than
+  the float64 replay because `pred` was itself computed in float32 (the CSV stores it with float32
+  precision). The remaining gap is a few float32 rounding steps; the pieces were saved from a GPU,
+  so `pred` was most likely computed there, where sums are added up in a different order.
 
 ## 14. Other solvers
 

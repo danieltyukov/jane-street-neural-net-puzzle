@@ -27,6 +27,8 @@ class Pairing:
     out: list[int]
     margin: float                   # smallest gap between a block's own score and its best rival
     agrees_with_argmin: bool        # each row's minimum already gives the same matching
+    negative_units: int             # hidden units of true pairs whose read . write is negative
+    units: int
 
 
 def trace_scores(puzzle: Puzzle) -> tuple[np.ndarray, list[int], list[int]]:
@@ -49,4 +51,6 @@ def pair(puzzle: Puzzle) -> Pairing:
     col_gap = rivals[:, cols].min(axis=0) - own     # best other inp layer for this out layer
     margin = float(min(row_gap.min(), col_gap.min()))
     agrees = bool(np.array_equal(scores.argmin(axis=1)[rows], cols))
-    return Pairing(blocks, scores, inp, out, margin, agrees)
+    per_unit = [np.einsum("hd,dh->h", puzzle.pieces[i].weight, puzzle.pieces[o].weight) for i, o in blocks]
+    negative = int(sum((u < 0).sum() for u in per_unit))
+    return Pairing(blocks, scores, inp, out, margin, agrees, negative, int(sum(u.size for u in per_unit)))

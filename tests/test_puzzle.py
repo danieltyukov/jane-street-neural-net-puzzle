@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import random
+import string
 
 import pytest
 
@@ -97,6 +99,12 @@ def test_quirks(ctx):
     assert q["length_bits"][55] == [193, 1, 1, 1, 1]
     # every length bit comes from step 14's splitting chain, not from a look-alike elsewhere
     assert all(563 <= layer <= 605 for layer, _ in q["length_bit_neurons"].values())
+    # without the window, bit 7 matches a NOT gate at layer 104 that carries an equal value
+    rng = random.Random(3)  # the same batch quirks.length_bit_neurons uses
+    texts = ["".join(rng.choice(string.ascii_lowercase) for _ in range(rng.randint(0, 31))) for _ in range(200)]
+    index = probe.signature_index(ctx.net, texts)
+    hit = index[probe.bit_signature(pipeline.np.array([8 * len(t) for t in texts], dtype=pipeline.np.uint64), 7)]
+    assert hit.layer == 104 and ctx.net.describe(hit.layer, hit.neuron).endswith("+1)")
 
 
 def test_marker_is_added_before_splitting(ctx):
@@ -137,6 +145,7 @@ def test_pair(ctx):
     lo, hi = out["own_trace_range"]
     assert (round(lo, 2), round(hi, 2)) == (-13.49, -7.37)
     assert round(out["margin"], 2) == 5.79
+    assert (out["negative_units"], out["units"]) == (4480, 4608)
     assert round(out["pred_true_corr"], 3) == 0.940 and round(out["pred_true_mse"], 4) == 0.1065
     assert round(float(ctx.pairing.scores.mean()), 2) == -0.25 and ctx.pairing.scores.size == 2304
     assert ctx.dropped.kind("last") == [85] and len(ctx.dropped.x) == 10000
@@ -146,7 +155,7 @@ def test_order(ctx):
     out = pipeline.step_order(ctx)
     assert out["answer"] == ANSWER_2
     assert out["sha256"] == "093be1cf2d24094db903cbc3e8d33d306ebca49c6accaa264e44b0b675e7d9c4"
-    assert f"{out['max_abs_err']:.1e}" == "1.6e-06"
+    assert 1.5e-6 < out["max_abs_err"] < 1.7e-6
     assert out["start_inversions"] == 48 and out["evaluations"] == 330
     assert round(out["norm_depth_spearman"], 3) == 0.986
     sig = {k: round(v, 3) for k, v in out["depth_signals"].items()}
@@ -154,7 +163,7 @@ def test_order(ctx):
                    "mean of b_in": 0.881, "|W_in|": 0.853, "|b_in|": -0.302, "|b_out|": 0.25,
                    "trace(W_out W_in)": -0.249}
     r = ctx.ordering
-    assert f"{r.history[-1][1]:.1e}" == "1.6e-14" and r.history[-1][0] == 330
+    assert r.history[-1][1] < 1e-13 and r.history[-1][0] == 330  # float64 precision, about 1.6e-14
     before_last_move = [m for _, m, _ in r.history if m > 1e-10][-1]
     assert 1e-4 < before_last_move < 2e-4  # one swap takes it from ~1.6e-4 to float precision
     last_swap = [i for _, _, i in r.history if i >= 0][-1]
@@ -170,7 +179,8 @@ def test_crosscheck(ctx):
     assert out["ok"]
     assert out["hashnet"]["inputs"] == 64 and out["hashnet"]["comparator_width"] == 192
     assert out["hashnet"]["torch_outputs"] == {"bitter lesson": 1.0}
-    assert f"{out['dropped']['max_abs_err_vs_pred']:.1e}" == "4.8e-07" and out["dropped"]["rows"] == 10000
+    # float32 rounding depends on the CPU's kernels: 4.8e-7 on one machine, 4.9e-7 on GitHub's runners
+    assert out["dropped"]["max_abs_err_vs_pred"] < 1e-6 and out["dropped"]["rows"] == 10000
 
 
 def test_network_md5_explains_every_short_input(ctx):

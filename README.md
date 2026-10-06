@@ -10,14 +10,15 @@ Jane Street has published two puzzles that hand you a neural network and ask wha
    A residual network broken into 97 shuffled linear layers, plus 10,000 rows of its historical data.
    Put the layers back in order.
 
-This repository solves both from the raw files. Every step is a script you can run, and every
-number in this README apart from run times is asserted by a test. The aim is that someone who has
-never opened a `.pt` file can follow the whole chain: bytes, weights, circuit, meaning, answer.
+This repository solves both from the raw files. Every step is a script you can run, and every number
+in this README apart from run times and file sizes is asserted by a test. The aim is that someone
+who has never opened a `.pt` file can follow the whole chain: bytes, weights, circuit, meaning,
+answer.
 
 ```
 git clone https://github.com/danieltyukov/jane-street-neural-net-puzzle
 cd jane-street-neural-net-puzzle
-make setup fetch   # Python venv + both puzzles from Hugging Face (1.2 GB, SHA-256 checked)
+make setup fetch   # Python venv + both puzzles from Hugging Face (1.16 GB, SHA-256 checked)
 make all           # both solves, about 30 s on a 22-core desktop
 ```
 
@@ -159,7 +160,8 @@ All 64 MD5 steps are there, exactly 42 layers apart: step `i`'s new word is comp
 Adding two numbers is slow if each carry waits for the one below it. A bit position *generates* a
 carry if both input bits are 1 and *propagates* an incoming carry if exactly one is. A Kogge-Stone
 adder combines these (generate, propagate) pairs over spans of 1, 2, 4, 8 and 16 bits, so all 32
-carries are known after five levels instead of 32 steps. Level `k` updates `32 - 2^k` bit positions:
+carries are known after five levels instead of 32 steps. Level `k` updates `32 - 2^k` bit positions
+(the lowest `2^k` have no partner `2^k` below them):
 31, 30, 28, 24, 16, which is exactly how much the layer width rises above its floor in every adder
 of every step.
 
@@ -177,11 +179,12 @@ wires and turns them into bits again each time a step needs the word.
 ### 5. Where it stops being MD5
 
 Jane Street's write-up mentions that one solver found the network mishandles long inputs. The cause
-is visible in the first two layers. Layer 0 builds `x - relu(x-1)`, which is 1 for any non-NUL character, and layer 1
-neuron 224 adds those up times 8. That count `k`, not the position of the first NUL, decides both
-where the `0x80` padding byte is added and what goes in MD5's length field. The length `8k` is then split
-into bits by "subtract 128 if at least 128, subtract 64 if at least 64, ...". That handles at most
-255, so at most 31 characters:
+is visible in the first two layers. Layer 0 builds `x` and `relu(x-1)` for every character, and
+their difference is 1 for any non-NUL character. Layer 1 neuron 224 takes those differences and adds
+them up times 8. That count `k`, not the position of the first NUL, decides both where the `0x80`
+padding byte is added and what goes in MD5's length field. The length `8k` is then split into bits
+by "subtract 128 if at least 128, subtract 64 if at least 64, ...". That handles at most 255, so at
+most 31 characters:
 
 ![length bug](docs/img/length_bug.png)
 
@@ -219,7 +222,8 @@ unrelated and cancel; for a true pair they do not:
 ![pairing](docs/img/pairing.png)
 
 True pairs score between -13.5 and -7.4, everything else sits around 0, and the smallest gap is
-5.8. The negative sign means each unit pushes back against the direction it reads. The matching
+5.8. The negative sign means the units push back against the direction they read: 4,480 of the
+4,608 hidden units in true pairs (97%) have a negative read-dot-write. The matching
 itself is the standard assignment problem, solved with the Hungarian algorithm (simply taking each
 row's minimum gives the same answer here).
 
@@ -235,7 +239,7 @@ drops finishes the job in about ten seconds:
 
 ![ordering](docs/img/ordering.png)
 
-The reassembled network matches `pred` to 1.6e-6 on all 10,000 rows, and to 4.8e-7 when run in
+The reassembled network matches `pred` to 1.6e-6 on all 10,000 rows, and to about 5e-7 when run in
 float32 with the original PyTorch classes (closer, because `pred` itself was computed in float32).
 The SHA-256 of the answer equals the hash hard-coded in the puzzle's checker.
 
@@ -277,7 +281,7 @@ src/nnre/
   crosscheck.py    comparisons against PyTorch
   figures.py       everything in docs/img
   pipeline.py      the steps behind the CLI
-tests/             unit tests and end-to-end checks of every claim above
+tests/             unit tests and end-to-end checks of the numbers above
 docs/              the write-up, tool notes and figures
 data/              downloaded puzzle files (not in git)
 ```

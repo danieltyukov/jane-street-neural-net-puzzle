@@ -214,8 +214,11 @@ def step_pair(ctx: Context) -> dict:
     ctx.say(f"the original model's pred vs true: correlation {corr:.3f}, MSE {mse:.4f}")
     ctx.say(f"trace(W_out W_in): true pairs {min(own):.2f} .. {max(own):.2f}, all pairs mean {p.scores.mean():.2f}; "
             f"smallest margin {p.margin:.2f}; row minimum agrees with the optimal matching: {p.agrees_with_argmin}")
+    ctx.say(f"hidden units of true pairs that write against the direction they read: "
+            f"{p.negative_units} of {p.units} ({p.negative_units / p.units:.1%})")
     return {"blocks": p.blocks, "own_trace_range": [min(own), max(own)], "margin": p.margin,
             "pred_true_corr": corr, "pred_true_mse": mse,
+            "negative_units": p.negative_units, "units": p.units,
             "agrees_with_argmin": p.agrees_with_argmin, "ok": p.agrees_with_argmin and p.margin > 1}
 
 

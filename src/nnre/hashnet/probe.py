@@ -118,31 +118,6 @@ def step_start(i: int) -> int:
     return 59 + 42 * (i - 1)
 
 
-def presum_values(strings: list[str], i: int) -> np.ndarray:
-    """a + f + K[i] + M[g] before the rotation, for step i."""
-    return md5_traces(strings)["sum"][:, i]
-
-
-def linear_probe(net: HashNet, strings: list[str], values: np.ndarray, layers) -> dict[int, dict]:
-    """For each layer: how many of the 32 bits are an exact linear function of that layer's neurons.
-
-    A single-neuron probe asks "is this bit some neuron?"; a linear probe asks "is it some weighted
-    sum of neurons?". The network keeps XORs as a + b - 2*AND(a, b) spread over three neurons, which
-    only the second question can see. Needs more inputs than neurons per layer to mean anything.
-    """
-    acts = net.activations(strings, layers)
-    out = {}
-    for layer in layers:
-        a = np.hstack([acts[layer].T, np.ones((len(strings), 1))])
-        exact = 0
-        for j in range(32):
-            y = ((values >> np.uint64(j)) & np.uint64(1)).astype(np.float64)
-            coef, *_ = np.linalg.lstsq(a, y, rcond=None)
-            exact += int(np.abs(a @ coef - y).max() < 1e-6)
-        out[layer] = {"width": a.shape[1] - 1, "rank": int(np.linalg.matrix_rank(a)), "linear_bits": exact}
-    return out
-
-
 def message_schedule(net: HashNet, n: int = 160, seed: int = 0) -> dict[int, list[int]]:
     """Layers where bits of message words 0..7 are produced by a real gate (wires excluded).
 
@@ -203,7 +178,14 @@ def _step_inputs(strings: list[str], i: int) -> dict[str, np.ndarray]:
     return {"a": arr[:, 0], "f": arr[:, 1], "mk": arr[:, 2]}
 
 
-def _linear_bits(acts: np.ndarray, values: np.ndarray) -> int:
+def linear_bits(acts: np.ndarray, values: np.ndarray) -> int:
+    """How many of the 32 bits of ``values`` are an exact linear function of a layer's neurons.
+
+    A single-neuron probe asks "is this bit some neuron?"; a linear probe asks "is it some weighted
+    sum of neurons?". The network keeps XORs as a + b - 2*AND(a, b) spread over three neurons, which
+    only the second question can see. ``acts`` is (neurons, inputs); it needs more inputs than
+    neurons to mean anything, or every bit would fit trivially.
+    """
     a = np.hstack([acts.T, np.ones((acts.shape[1], 1))])
     exact = 0
     for j in range(32):
@@ -213,7 +195,8 @@ def _linear_bits(acts: np.ndarray, values: np.ndarray) -> int:
     return exact
 
 
-def _neuron_bits(acts: np.ndarray, values: np.ndarray) -> int:
+def neuron_bits(acts: np.ndarray, values: np.ndarray) -> int:
+    """How many of the 32 bits of ``values`` equal some single neuron of the layer."""
     rows = {acts[n].astype(np.int16).tobytes() for n in range(acts.shape[0])}
     return sum(bit_signature(values, j) in rows for j in range(32))
 
@@ -234,10 +217,10 @@ def step_anatomy(net: HashNet, steps=(5, 20, 37, 60), n: int = 800, seed: int = 
         v = _step_inputs(strings, i)
         a_f = (v["a"] + v["f"]) & np.uint64(md5.MASK)
         total = (a_f + v["mk"]) & np.uint64(md5.MASK)
-        out[i] = {"a+f linear at +15": _linear_bits(acts[st + 15], a_f),
-                  "M+K neurons at +15": _neuron_bits(acts[st + 15], v["mk"]),
-                  "sum linear at +27": _linear_bits(acts[st + 27], total),
-                  "sum linear at +28": _linear_bits(acts[st + 28], total)}
+        out[i] = {"a+f linear at +15": linear_bits(acts[st + 15], a_f),
+                  "M+K neurons at +15": neuron_bits(acts[st + 15], v["mk"]),
+                  "sum linear at +27": linear_bits(acts[st + 27], total),
+                  "sum linear at +28": linear_bits(acts[st + 28], total)}
     return out
 
 
