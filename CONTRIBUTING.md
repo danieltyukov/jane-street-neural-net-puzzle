@@ -1,8 +1,8 @@
 # Contributing
 
 Issues and pull requests are welcome. The most useful ones add an explanation that would have helped
-you when you were stuck, a cleaner way to see a structure in one of the networks, or a different
-route to either answer.
+you when you were stuck, or show a structure in one of the networks more clearly than the current
+code does.
 
 ## Getting set up
 
@@ -14,9 +14,9 @@ make torch    # optional, for the cross-checks
 make test
 ```
 
-`make test` runs the unit tests (no puzzle files needed) and the end-to-end checks, which assert every
-number quoted in the README and the write-up. If you change behaviour, update the docs and the test
-together.
+`make test` runs the unit tests (no puzzle files needed) and the end-to-end checks, which assert the
+numbers quoted in the README and the write-up (run times aside). If you change behaviour, update the
+docs and the test together.
 
 ## Style
 

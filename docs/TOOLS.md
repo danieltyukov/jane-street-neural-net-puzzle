@@ -40,10 +40,12 @@ python -m pickletools puzzle/data.pkl | grep GLOBAL
 1726438: c                GLOBAL     'cloudpickle.cloudpickle subimport'
 ```
 
-Every name a pickle can call appears as a `GLOBAL` (or `STACK_GLOBAL`) opcode, so this list is the
-complete set of code the file could run. The `cloudpickle` entries near the end are the custom
-forward wrapper. `nnre unpickle` prints the same list from
-[`torchzip.referenced_globals`](../src/nnre/torchzip.py).
+Every name a pickle can call is imported through a `GLOBAL`, `STACK_GLOBAL` or `INST` opcode (or the
+rarely used extension registry). This file only uses `GLOBAL`, so the list above is complete. The
+`cloudpickle` entries near the end are the custom forward wrapper. In general, reading names off the
+opcode stream means tracking the pickle's stack and memo, so `nnre unpickle` takes the safer route in
+[`torchzip.referenced_globals`](../src/nnre/torchzip.py): it runs an unpickler that records every
+name it is asked for and returns a harmless placeholder instead of importing anything.
 
 ## What torch says
 
@@ -56,8 +58,10 @@ fails with `Unsupported global: GLOBAL torch.nn.modules.container.Sequential was
 global by default`. `weights_only=True` (the default since PyTorch 2.6) only accepts tensors and
 plain containers, and this file stores whole modules. The error suggests either trusting the file
 (`weights_only=False`) or allowlisting the class. [`crosscheck.py`](../src/nnre/crosscheck.py) does a
-stricter version of the second: a custom unpickler that accepts the eight globals a Linear/ReLU stack
-needs and turns the cloudpickle helpers into dummies.
+stricter version of the second. It first checks the file against the published SHA-256, then passes
+torch a custom unpickler that accepts the eight globals a Linear/ReLU stack needs and turns the
+cloudpickle helpers into dummies. The allowlist has to cover both of torch's entry points: its
+`Unpickler` for zip archives and its `load` for the legacy format.
 
 The pieces of puzzle 2 are plain `state_dict`s, so this works directly:
 

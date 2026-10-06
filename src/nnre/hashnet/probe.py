@@ -32,11 +32,16 @@ def random_inputs(n: int, seed: int = 0, max_len: int = 31) -> list[str]:
     return ["".join(chr(rng.randint(1, 255)) for _ in range(rng.randint(0, max_len))) for _ in range(n)]
 
 
-def signature_index(net: HashNet, strings: list[str]) -> dict[bytes, Located]:
-    """First neuron (in depth order) for every distinct signature that is not constant."""
+def signature_index(net: HashNet, strings: list[str], layers: range | None = None) -> dict[bytes, Located]:
+    """First neuron (in depth order) for every distinct signature that is not constant.
+
+    ``layers`` limits the search, which matters when the same value is computed in several places.
+    """
     index: dict[bytes, Located] = {}
 
     def visit(layer: int, act: np.ndarray) -> None:
+        if layers is not None and layer not in layers:
+            return
         varying = np.nonzero(act.max(axis=1) != act.min(axis=1))[0]
         rows = act[varying].astype(np.int16)
         for n, row in zip(varying, rows):
@@ -179,3 +184,76 @@ def byte_splitters(net: HashNet) -> list[int]:
             if w.data[w.indptr[n]] == 1 and net.biases[layer][n] == -127:
                 out.append(layer)
     return out
+
+
+def _step_inputs(strings: list[str], i: int) -> dict[str, np.ndarray]:
+    """a, f, b and M[g] + K[i] at the start of step i, for each input."""
+    rows = []
+    for s in strings:
+        m = np.frombuffer(md5.network_block(s), dtype="<u4")
+        a, b, c, d = md5.IV
+        for k in range(i):
+            f = md5.round_function(k, b, c, d) & md5.MASK
+            total = (a + f + md5.K[k] + int(m[md5.message_index(k)])) & md5.MASK
+            a, d, c = d, c, b
+            b = (b + md5.rotl(total, md5.SHIFT[k])) & md5.MASK
+        f = md5.round_function(i, b, c, d) & md5.MASK
+        rows.append((a, f, (int(m[md5.message_index(i)]) + md5.K[i]) & md5.MASK))
+    arr = np.array(rows, dtype=np.uint64)
+    return {"a": arr[:, 0], "f": arr[:, 1], "mk": arr[:, 2]}
+
+
+def _linear_bits(acts: np.ndarray, values: np.ndarray) -> int:
+    a = np.hstack([acts.T, np.ones((acts.shape[1], 1))])
+    exact = 0
+    for j in range(32):
+        y = ((values >> np.uint64(j)) & np.uint64(1)).astype(np.float64)
+        coef, *_ = np.linalg.lstsq(a, y, rcond=None)
+        exact += int(np.abs(a @ coef - y).max() < 1e-6)
+    return exact
+
+
+def _neuron_bits(acts: np.ndarray, values: np.ndarray) -> int:
+    rows = {acts[n].astype(np.int16).tobytes() for n in range(acts.shape[0])}
+    return sum(bit_signature(values, j) in rows for j in range(32))
+
+
+def step_anatomy(net: HashNet, steps=(5, 20, 37, 60), n: int = 800, seed: int = 7) -> dict[int, dict]:
+    """The four-operand sum inside a step, measured with linear and single-neuron probes.
+
+    For each step: at offset +15, are a + f and M + K[i] present (both 32 bits)? At +27 and +28, how
+    many bits of the full sum a + f + K + M are linear in the layer? Use steps whose message word is
+    one of 0..7, so it varies across short inputs.
+    """
+    strings = random_inputs(n, seed)
+    wanted = {step_start(i) + off for i in steps for off in (15, 27, 28)}
+    acts = net.activations(strings, wanted)
+    out = {}
+    for i in steps:
+        st = step_start(i)
+        v = _step_inputs(strings, i)
+        a_f = (v["a"] + v["f"]) & np.uint64(md5.MASK)
+        total = (a_f + v["mk"]) & np.uint64(md5.MASK)
+        out[i] = {"a+f linear at +15": _linear_bits(acts[st + 15], a_f),
+                  "M+K neurons at +15": _neuron_bits(acts[st + 15], v["mk"]),
+                  "sum linear at +27": _linear_bits(acts[st + 27], total),
+                  "sum linear at +28": _linear_bits(acts[st + 28], total)}
+    return out
+
+
+def adder_widths(net: HashNet) -> dict[str, list]:
+    """How far the layer widths rise above the floor inside each step's two adder windows.
+
+    The windows are offsets +16..28 and +29..41. The floor is the most common width in the window
+    (288 in most steps, 192 in the last one, which carries fewer words along).
+    """
+    widths = np.array(net.widths())
+    patterns, floors = set(), set()
+    for i in range(64):
+        st = step_start(i)
+        for lo, hi in ((16, 29), (29, 42)):
+            w = [int(x) for x in widths[st + lo:st + hi]]
+            floor = max(set(w), key=w.count)
+            floors.add(floor)
+            patterns.add(tuple(x - floor for x in w if x > floor))
+    return {"rises": sorted(patterns), "floors": sorted(floors)}

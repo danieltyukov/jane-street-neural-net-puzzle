@@ -67,14 +67,18 @@ def md5(msg: bytes) -> bytes:
 def network_block(text: str) -> bytes:
     """The block the network builds from its 55 input code points.
 
-    It never looks for the end of the string. It counts the non-NUL characters, k, puts the 0x80
-    marker at position k and writes 8k into the length field. Without embedded NULs that is the
-    standard padding. Valid for k <= 31 (see quirks.py for what happens beyond).
+    It never looks for the end of the string. It counts the non-NUL characters, k, adds 0x80 to
+    the byte at position k and writes 8k into the length field. Without embedded NULs, position k
+    holds a NUL and this is the standard padding. Exact while k <= 31 and the code point at
+    position k is below 128; otherwise the network's 8-bit splitting overflows (see quirks.py) and
+    this raises ValueError, because no block describes what the network does then.
     """
     x = [ord(c) for c in text[:55].ljust(55, "\x00")]
     k = sum(1 for c in x if c)
+    if k > 31 or x[k] > 127 or max(x) > 255:
+        raise ValueError("outside the range where the network computes an MD5 compression")
     block = bytearray(x + [0] * 9)
-    block[k] |= 0x80
+    block[k] += 0x80
     block[56:64] = struct.pack("<Q", 8 * k)
     return bytes(block)
 

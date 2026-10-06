@@ -7,7 +7,7 @@ integers and 99.6% of the weights are zero, so the whole network fits in a few M
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +24,6 @@ class HashNet:
     weights: list[sp.csr_matrix]
     biases: list[np.ndarray]
     wrapper: str = ""
-    globals: dict = field(default_factory=dict)
 
     @property
     def depth(self) -> int:
@@ -104,7 +103,6 @@ class HashNet:
 
 def from_model_pt(path: Path) -> HashNet:
     arc = TorchArchive.open(path)
-    seen = dict(arc.globals())
     root = arc.graph()
     if root.qualname != "torch.nn.modules.container.Sequential":
         raise ValueError(f"unexpected root object {root.qualname}")
@@ -129,7 +127,7 @@ def from_model_pt(path: Path) -> HashNet:
     # The replaced _call_impl: cloudpickle's _make_function(code, globals, name, defaults, closure)
     make_fn = root.state["_call_impl"]
     co = pybytecode.code_fields(make_fn.args[0].args)
-    return HashNet(weights, biases, pybytecode.decompile(co), seen)
+    return HashNet(weights, biases, pybytecode.decompile(co))
 
 
 def load(cache: Path | None = None) -> HashNet:

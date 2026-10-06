@@ -7,7 +7,9 @@
 2. The length 8k is split into bits by a chain of "subtract 2^j if at least 2^j" stages that starts
    at 128. That handles 8k <= 255, so k <= 31. From 32 characters on, the stages see a remainder
    larger than they were built for, the "bits" stop being 0/1 and the hash is garbage. This is the
-   ">32 bytes" bug Jane Street mentions in their write-up.
+   long-input bug Jane Street mentions in their write-up.
+3. The 0x80 marker is added to the byte at position k before that byte is split, so the same
+   overflow happens when a code point of 128 or more sits there (only possible with NULs inside).
 """
 
 from __future__ import annotations
@@ -62,11 +64,17 @@ def by_length(net: HashNet, cmp: readout.Comparator, lengths=range(0, 56), per: 
 
 
 def length_bit_neurons(net: HashNet, n: int = 200, seed: int = 3) -> dict[int, tuple[int, int]]:
-    """Neurons that hold bits 3..7 of the length field 8k, found by signature on strings with k <= 31."""
-    from .probe import Located, bit_signature, signature_index
+    """Neurons that hold bits 3..7 of the length field 8k, found by signature on strings with k <= 31.
+
+    The search is limited to the window where step 14's word (the length field) is split into bits.
+    Neurons elsewhere can carry an equal value (one at layer 104 matches bit 7), and the point here
+    is to read the splitting chain itself.
+    """
+    from .probe import Located, bit_signature, signature_index, step_start
     rng = random.Random(seed)
     texts = ["".join(rng.choice(string.ascii_lowercase) for _ in range(rng.randint(0, 31))) for _ in range(n)]
-    index: dict[bytes, Located] = signature_index(net, texts)
+    window = range(step_start(14) - 42, step_start(14) + 1)
+    index: dict[bytes, Located] = signature_index(net, texts, window)
     eight_k = np.array([8 * len(t) for t in texts], dtype=np.uint64)
     found = {}
     for j in range(3, 8):

@@ -10,7 +10,7 @@ Two ways to search it:
   with depth in this model, then fix the remaining local mistakes with adjacent swaps. Seconds.
 * ``search``: assume nothing. Build an order greedily and improve it by moving one block at a time
   to its best position until no move helps. This is how the answer was first found; it takes about
-  ten minutes.
+  13 minutes on a 22-core desktop.
 """
 
 from __future__ import annotations
@@ -83,10 +83,14 @@ def norm_start(puzzle: Puzzle, blocks: list[Block]) -> list[Block]:
 
 
 def adjacent_swaps(mse, order: list[Block], history: list | None = None) -> tuple[list[Block], float, int]:
-    """Swap neighbours while that lowers the error. ``history`` collects (evaluations, mse)."""
+    """Swap neighbours while that lowers the error.
+
+    ``history`` collects (evaluations, mse, i) after every improving swap of positions i and i+1
+    (i = -1 for the start and for the final sweep that confirms nothing improves).
+    """
     cur, evals, improved = mse(order), 1, True
     if history is not None:
-        history.append((evals, cur))
+        history.append((evals, cur, -1))
     while improved:
         improved = False
         for i in range(len(order) - 1):
@@ -96,7 +100,9 @@ def adjacent_swaps(mse, order: list[Block], history: list | None = None) -> tupl
             if m < cur:
                 order, cur, improved = cand, m, True
                 if history is not None:
-                    history.append((evals, cur))
+                    history.append((evals, cur, i))
+    if history is not None and history[-1][0] != evals:
+        history.append((evals, cur, -1))
     return order, cur, evals
 
 

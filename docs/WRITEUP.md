@@ -2,8 +2,9 @@
 
 This is the long version of the README. It follows the solves in the order they actually happened,
 wrong turns included, with the details that matter if you want to build the same tools yourself.
-Every number here comes out of `make all`; `build/results.log` has the raw output. Spoilers start
-right away.
+Every number here is printed by `make all` (`build/results.log` has the raw output) and asserted in
+`tests/test_puzzle.py`, except run times and the pass-by-pass log of the slow search in section 12,
+which `nnre order --method search` prints. Spoilers start right away.
 
 Contents
 
@@ -57,8 +58,10 @@ program. Most of its opcodes build lists, dicts and tuples, but `GLOBAL` imports
 and `REDUCE` calls it with arguments. That is how pickles rebuild arbitrary classes, and it is also
 why loading one runs whatever code it names.
 
-Since every callable has to be imported with `GLOBAL` (or `STACK_GLOBAL`) first, listing those
-opcodes gives the complete set of code the file could run. For `model.pt`:
+Every callable a pickle can reach is imported by name first, through the `GLOBAL`, `STACK_GLOBAL`
+or `INST` opcode (or the rarely used extension registry), and all of those go through one method of
+the unpickler, `find_class`. So an unpickler that records each `find_class` call and imports nothing
+lists the complete set of code the file could run. For `model.pt`:
 
 ```
 torch.nn.modules.container.Sequential     torch.nn.modules.linear.Linear
@@ -73,12 +76,15 @@ cloudpickle.cloudpickle._function_setstate  cloudpickle.cloudpickle.subimport
 Nothing alarming, but the last four are interesting: they rebuild a Python *function*, with its
 bytecode, from the file.
 
-To read the rest, [`torchzip.py`](../src/nnre/torchzip.py) runs the pickle with a custom
-`find_class`. Instead of importing anything, it hands back a freshly made placeholder class named
-after the global. Calling a placeholder records the arguments; `BUILD` records the state. The result
-is the full object graph made of placeholders and plain containers, and no code from the file has
-run. A tensor shows up as a `_rebuild_tensor_v2` placeholder whose arguments are
-`(storage key, offset, shape, stride)`, which is enough to read it from the zip with numpy.
+That is what [`torchzip.py`](../src/nnre/torchzip.py) does. Its `find_class` records the name and,
+instead of importing anything, hands back a freshly made placeholder class named after it. Calling a
+placeholder records the arguments; `BUILD` records the state. The only real objects it creates are
+plain containers (`OrderedDict`, `set`) and the bytes they hold. The result is the full object graph,
+and no code from the file has run. A tensor shows up as a `_rebuild_tensor_v2` placeholder whose
+arguments are `(storage key, offset, shape, stride)`, which is enough to read it from the zip with
+numpy. Those four numbers come from the file too, so the reader checks that the last element they
+describe lies inside the storage before it creates a view; otherwise a crafted file could make numpy
+read past the end of the buffer.
 
 The graph is a `Sequential` with 5442 children, alternating `Linear` and `ReLU`, and an extra
 instance attribute: `_call_impl`, set to the cloudpickled function. `nn.Module.__call__` looks up
@@ -116,8 +122,9 @@ lambda x: model.forward(torch.Tensor(list(map(ord, str(x)[:55].ljust(55, '\x00')
 The model sees the code points of the first 55 characters, padded with NULs to exactly 55 floats.
 
 This also explains the two files. Bytecode is version-specific and the code object constructor
-gained fields in 3.11, so a function pickled by 3.10 cannot be rebuilt by 3.11. The 5442 tensor
-storages in the two files are byte-identical.
+gained fields in 3.11, so a function pickled by 3.10 cannot be rebuilt by 3.11. A one-off comparison
+of the two downloads showed that their 5442 tensor storages are byte-identical (not part of
+`make all`, which only fetches `model.pt`).
 
 ## 4. First look at the weights
 
@@ -130,8 +137,8 @@ Reading every storage gives 2721 weight matrices and bias vectors. Layer 0 is 22
 
 Nobody trains a network like that. It was written by hand, or compiled from something. Stored as
 sparse matrices it takes 0.64 MB instead of 1.16 GB, and a batch of a few hundred inputs runs in
-about a second with scipy (`hashnet/model.py`). Because every value is an integer far below 2^53,
-float64 arithmetic is exact, so this simulator is not an approximation.
+about a second with scipy (`hashnet/model.py`). float64 represents every integer up to 2^53 exactly,
+and every value here stays far below that, so this simulator is exact, not an approximation.
 
 `vegetable dog` gives 0, as on the website.
 
@@ -166,10 +173,11 @@ For 200 random inputs it equals `MD5(input)` every time.
 
 Eight of the bytes have a twist. Bytes 0-3 and 8-11 are plain: weights 1, 2, 4, ..., 128 on eight
 0/1 neurons. Bytes 4-7 and 12-15 also subtract 2, 4, ..., 256 times eight more neurons, and some of
-the "bits" they add hold the value 2. That is *carry-save* form: a sum whose carries have not been
-propagated yet. For `vegetable dog`, byte 7 arrives as 428 - 2 x 205 = 18, and MD5 byte 7 of
-`vegetable dog` is `0x12` = 18. The comparator does the last carry propagation for free, because
-it only ever needs the weighted sum.
+the "bits" they add hold the value 2. Each bit of those bytes arrives as two neurons, `s = a + b`
+(0, 1 or 2) and `n = AND(a, b)`, and the bit itself is `s - 2n`, which is `a XOR b`. That is the XOR
+trick explained in section 6: the last XOR of the final addition is left for the comparator's
+weights to apply. For `vegetable dog`, byte 7 arrives as 428 - 2 x 205 = 18, and MD5 byte 7 of
+`vegetable dog` is `0x12` = 18.
 
 ## 6. The gate alphabet
 
@@ -206,12 +214,33 @@ comparison with two neurons.
 
 The comparator says "this is MD5". The next question is where MD5 lives in the 2719 layers before it.
 
+### MD5 in one block
+
+MD5 pads a message into 64-byte blocks: the message, one `0x80` byte, zeros, and the message length
+in bits as an 8-byte little-endian number in the last 8 bytes. Up to 64 - 1 - 8 = 55 bytes fit in a
+single block, which is why the wrapper keeps 55 characters. The block is read as 16 little-endian
+32-bit words `M[0..15]`.
+
+Four 32-bit registers `a, b, c, d` start from fixed constants, the IV, and go through 64 steps in
+four rounds of 16. Step `i` computes
+
+```
+f = F(b, c, d)                          # F, G, H or I, one per round: bitwise logic
+b' = b + rotl(a + f + K[i] + M[g], s)   # K[i] and the rotation s are constants, g picks a word
+a, b, c, d = d, b', b, c                # the other registers shift along
+```
+
+with all additions mod 2^32. After step 63 the IV is added back to the registers, and the four
+words, written little-endian, are the 16-byte digest.
+[`md5.py`](../src/nnre/hashnet/md5.py) implements exactly this, with a hook that records `f`, the
+sum before the rotation, and the new `b` for every step.
+
 ### Signature probing
 
 Run 160 random inputs of up to 31 characters at once. Each neuron's *signature* is its vector of
 160 values. Index the first neuron with each distinct signature (108,714 of them that are not
-constant). Then compute MD5 in Python with a hook that records every intermediate word
-([`md5.py`](../src/nnre/hashnet/md5.py)), and look up the signature of every bit of every word.
+constant). Then compute MD5 in Python for the same inputs and look up the signature of every bit of
+every recorded word.
 
 If a bit that looks random across the inputs matches a neuron on all 160, the neuron carries that
 bit. ([`probe.py`](../src/nnre/hashnet/probe.py))
@@ -219,36 +248,48 @@ bit. ([`probe.py`](../src/nnre/hashnet/probe.py))
 ### Results
 
 - **All 64 steps.** For every MD5 step, all 32 bits of the new word `b` are found. Step `i` is
-  complete at layer `59 + 42*i`, with no exceptions: the network is 64 copies of a 42-layer block,
-  plus 17 layers of preparation before step 0, 13 layers after step 63 that add the initial state
-  back in (MD5's final feed-forward), and the 2-layer comparator.
-- **The round function.** F, G, H or I appears as 32 neurons 2 layers into every step where it
-  varies (63 of 64; in step 0 it is a constant because the inputs are the IV).
-- **Two Kogge-Stone adders per step.** The layer widths inside a step (figure in the README) rise
-  above a floor of 288 by 31, 30, 28, 24 and 16, twice. A Kogge-Stone adder computes all carries of
-  a 32-bit addition in log2(32) = 5 levels, and level `k` combines `32 - 2^k` pairs of
-  (generate, propagate) signals: 31, 30, 28, 24, 16. Each level takes two layers. The first holds
-  the ANDs (62 of them at level 0: a new generate and a new propagate for each of the 31 pairs), the
-  second holds NORs, an OR stored inverted, which the next level's NOT and AND-NOT gates absorb. The
-  first adder computes `a + f + K[i] + M[g]`, the second adds the rotated result to `b`.
-- **The new word appears all at once.** Bit 0 of the new `b` shows up at offset 30 (it has no
-  carry-in), the other 31 bits at offset 42, the end of the second adder.
+  complete at layer `59 + 42*i`, with no exceptions. Step 0 occupies layers 18 to 59, so the
+  network is 18 layers of preparation, 64 copies of a 42-layer block, 13 layers after step 63 that
+  add the IV back in, and the 2-layer comparator: 18 + 2688 + 13 + 2 = 2721.
+- **The round function.** F, G, H or I appears as 32 neurons 2 layers into the step, from step 3
+  on. In steps 0 to 2 some of its inputs are still IV constants, so parts of it are constant or
+  equal to bits that already exist, and the signatures cannot place it.
+- **Two additions side by side.** The widest stretch of a step, offsets 3 to 15, computes `a + f`
+  and `M[g] + K[i]` at the same time. At offset 15 all 32 bits of `M + K` are single neurons and all
+  32 bits of `a + f` are exact linear combinations of the layer (checked in steps 5, 20, 37 and 60;
+  the next section explains why "linear combination"). That turns the four-operand sum into a sum
+  of two numbers.
+- **Two Kogge-Stone adders.** Adding two 32-bit numbers is slow if each carry waits for the one
+  below it. A bit position *generates* a carry if both input bits are 1 and *propagates* an incoming
+  carry if exactly one is. A Kogge-Stone adder combines these (generate, propagate) pairs over spans
+  of 1, 2, 4, 8 and 16 bits, so all carries are known after log2(32) = 5 levels. Level `k` updates
+  `32 - 2^k` bit positions: 31, 30, 28, 24, 16. In every step, both adder windows (offsets 16 to 28
+  and 29 to 41) rise above their floor by exactly those amounts, once per level. The floor is 288
+  neurons in most steps and 192 in the last one, which has fewer words to carry along. Each level
+  takes two layers. At level 0, the first layer holds 62 ANDs: for each of the 31 positions,
+  `P_i AND G_(i-1)` (half of the new generate) and `P_i AND P_(i-1)` (the new propagate). The second
+  holds 31 NORs, which finish the new generate as an OR stored inverted; the next level's NOT and
+  AND-NOT gates absorb the inversion. The first adder computes `(a + f) + (M + K)`, the second adds
+  the rotated result to `b`.
+- **The new word appears all at once.** From step 1 on, bit 0 of the new `b` shows up at offset 30
+  (it has no carry-in) and the other 31 bits at offset 42, the end of the second adder.
 
 ### The sum that is nowhere
 
 One intermediate refused to show up: the 32-bit sum `a + f + K[i] + M[g]` before the rotation. In
-all 31 steps that read a varying message word, at most 1 of its 32 bits matches any single neuron.
-Yet the next adder clearly uses it.
+all 31 steps after the first that read one of the words 0 to 7 (the ones that carry characters, so
+they vary across the probe inputs), at most 1 of its 32 bits matches any single neuron. Yet the next
+adder clearly uses it.
 
 The XOR trick explains it. The sum's bits are XORs of propagate signals and carries, and the network
 never stores an XOR. It stores the pieces, and the weights of the next layer combine them. So ask a
 different question: is each bit a *linear combination* of a layer's neurons? With 800 random inputs
 (more than the ~300 neurons per layer, so the answer is not trivially yes) and least squares:
 
-| Layer offset in step 5 | Bits that are exactly linear in that layer |
+| Layer offset inside the step | Bits that are exactly linear in that layer (steps 5, 20, 37, 60) |
 |---:|---:|
-| +27 | 1 / 32 |
-| +28 | 32 / 32 |
+| +27 | 1 / 32 in each |
+| +28 | 32 / 32 in each |
 
 At the end of the first adder, every bit of the sum is an exact linear function of the layer, while
 almost none is a neuron. Rotating it costs nothing: it is just which of these combinations feeds
@@ -274,27 +315,30 @@ Signatures identify a value, not a meaning. Two quantities that are equal on eve
 signature. The first version of this analysis looked for `M[g] + K[i]` and "found" step 17's value
 twelve steps early. It was a collision: the low bit of `M + K` is the low bit of `M`, flipped or not
 depending on the low bit of `K`, so `M[6] + K[17]` and `M[6] + K[6]` share their low bits whenever
-the constants do. The fix is to only trust matches for bits that genuinely differ between the
-candidates, which is why the README sticks to `b`, `f` and the message words.
+the constants do. The fixes are to look in one specific layer (as the step measurements above do)
+and to only trust matches for bits that genuinely differ between the candidates.
 
 ## 8. Where it stops being MD5
 
-Jane Street's write-up mentions that a solver found the network mishandles inputs over 32 bytes.
-Measuring it: the comparator's value equals `MD5(input)` for every length from 0 to 31 and for no
-length from 32 to 55.
+Jane Street's write-up mentions that a solver found the network mishandles long inputs. Measuring
+it: the comparator's value equals `MD5(input)` for every length from 0 to 31 and for no length from
+32 to 55, so the trouble starts at 32 bytes.
 
 ### The first guess was wrong
 
 MD5 puts the message length in bits, `8n`, in the last 8 bytes of the block. For `n < 32` it fits in
 one byte, for `n >= 32` it does not. So the obvious guess is that the network only writes the low
-byte of the length. Testing it with a hand-made block (`compress()` in `md5.py` takes any 64 bytes):
-no match for any length. Also not `8n mod 256`.
+byte of the length, `8n mod 256`. Testing it with a hand-made block (`compress()` in `md5.py` takes
+any 64 bytes): no match for any length.
 
 ### Reading the network's own block
 
-Instead of guessing, read the network. The signature probe locates the neurons that hold each bit of
-message word 14 (the length field). For a 31-character input they read `[1, 1, 1, 1, 1]` for bits 3
-to 7, which is 248 = 8 x 31. For longer inputs:
+Instead of guessing, read the network. Step 14 reads message word 14, the length field, and its
+bytes are split into bits in the window just before that step (layers 563 to 605). A signature probe
+limited to that window, on inputs of up to 31 characters, locates the neurons that hold bits 3 to 7
+of the length. (Without the limit, bit 7 matches a NOT gate at layer 104 that happens to carry an
+equal value: the trap from section 7 again.) For a 31-character input they read `[1, 1, 1, 1, 1]`,
+which is 248 = 8 x 31. For longer inputs:
 
 | Characters | Bits 3..7 of the length field |
 |---:|---|
@@ -309,36 +353,41 @@ A "bit" holding 9 is the tell. Tracing backwards with `net.describe(layer, neuro
    any non-zero code point.
 2. Layer 1 neuron 224 adds up 8 times those differences: **8k, where k is the number of non-NUL
    characters**.
-3. Around layer 563 that value is split into bits with the same subtract-if-at-least chain as the
+3. At layer 563 that value is split into bits with the same subtract-if-at-least chain as the
    message bytes, starting at 128.
 
-A chain that starts at 128 can only represent values up to 255. For 32 characters, `8k = 256`: the
-128 stage subtracts 128, the 64 stage subtracts 64, and so on, and the last stage is left holding
-`256 - 248 = 8` plus its own bit. The overflow lands in "bit 3" and grows by 8 per extra character.
-After that the hash is not a hash of anything.
+A chain that starts at 128 can only represent values up to 255. For 32 characters, `8k = 256`. The
+128, 64, 32 and 16 stages each fire and subtract, which leaves 16 where a valid input leaves 0 or 8.
+The bit-3 neuron is `relu(x - 7)`, so it reads 9. Each extra character adds 8 more: 73 for 40
+characters, 193 for 55. After that the hash is not a hash of anything.
 
-### NULs
+### NULs, and one more overflow
 
 Step 2 has a second consequence: the network never looks for the end of the string. It counts the
-non-NUL characters `k`, puts the `0x80` padding marker at position `k` and writes `8k` into the
-length. Without NULs inside the string, `k` is the length and this is standard MD5. With NULs
-inside, it is something else: for `ab\0cd`, `k = 4`, so the marker lands on top of the `d`.
-`md5.network_md5` implements exactly this rule and matches the network on 300 random strings with
-embedded NULs; plain MD5 of the same strings matches none.
+non-NUL characters `k`, adds `0x80` to the byte at position `k` and writes `8k` into the length.
+Without NULs inside the string, position `k` holds a NUL and this is standard MD5. With NULs inside,
+it is something else: for `ab\0cd`, `k = 4`, so the marker lands on top of the `d` (100 + 128 =
+228). `md5.network_md5` implements this rule and matches the network on 300 random strings with
+embedded NULs and ASCII characters; plain MD5 of the same strings matches none.
 
-(Code points above 255 are a third way to leave MD5, since the byte-splitting chain assumes values
-below 256. The original wrapper uses `ord`, not UTF-8, so `é` is one byte, 0xE9, and anything
-outside Latin-1 is out of range.)
+The marker is added before the byte is split into bits, so the same overflow appears if the byte at
+position `k` is 128 or more. Reading the input of step 1's splitter shows it directly: 228 for `d`,
+255 for code point 127, then 256 for code point 128 and 361 for `é`. `network_md5` refuses those
+inputs rather than pretend there is a block that explains them.
+
+(Code points above 255 are yet another way out, for the same reason. The original wrapper uses
+`ord`, not UTF-8, so `é` is one byte, 0xE9, and anything outside Latin-1 is out of range.)
 
 ## 9. Cracking the hash
 
-MD5 has no known preimage attack, and the network is no help as an oracle either: its output is 0
-for every wrong input, so there is no gradient to follow. What is left is guessing well.
+MD5 has no practical preimage attack (the best published one, by Sasaki and Aoki in 2009, still
+needs about 2^123 operations), and the network is no help as an oracle either: its output is 0 for
+every wrong input, so there is no gradient to follow. What is left is guessing well.
 
 The hints are the default input `vegetable dog` and `# two words?`. A first attempt with the
-popular [google-10000-english](https://github.com/first20hours/google-10000-english) list (10^8 pairs,
-a few seconds in parallel) found nothing. The `/usr/share/dict/american-english` word list (63,875 lowercase words, 4 x 10^9
-pairs) did, after five and a half minutes on 20 cores:
+popular [google-10000-english](https://github.com/first20hours/google-10000-english) list (10^8
+pairs, a few seconds in parallel) found nothing. The `/usr/share/dict/american-english` word list
+(63,875 lowercase words, 4 x 10^9 pairs) did, after five and a half minutes on 20 cores:
 
 ```
 MD5("bitter lesson") = c7ef65233c40aa32c2b9ace37595fa7c
@@ -392,7 +441,8 @@ with `map_location`), and `historical_data.csv` with 10,000 rows: `measurement_0
 
 The shapes split the pieces into 48 `inp` layers (96 x 48), 48 `out` layers (48 x 96) and one final
 layer (1 x 48, piece 85). So the network is 48 residual blocks of width 48 with 96 hidden units,
-then a linear readout. `pred` is the original model's output (correlation 0.940 with `true`, MSE
+then a linear readout. The 48-number vector that flows from block to block, each block adding its
+output to it, is called the *residual stream*. `pred` is the original model's output (correlation 0.940 with `true`, MSE
 0.1065), which turns out to be the key column.
 
 Two sub-problems: which `inp` goes with which `out` (48! ways), and in which order the blocks go
@@ -423,8 +473,9 @@ In this model every true pair has a clearly *negative* trace:
 - the smallest gap between a true pair and any rival in its row or column: 5.79
 
 Each unit pushes back against the direction it detects, so each block damps the features it
-reads. The Hungarian algorithm on this matrix gives the matching, and so does simply taking each
-row's minimum. Hyunwoo Park's [paper on this puzzle](https://arxiv.org/abs/2602.19845) uses the same
+reads. Picking one `out` per `inp` so that the total score is lowest is the classic assignment
+problem, which the Hungarian algorithm (`scipy.optimize.linear_sum_assignment`) solves exactly; here
+simply taking each row's minimum gives the same matching. Hyunwoo Park's [paper on this puzzle](https://arxiv.org/abs/2602.19845) uses the same
 negative-diagonal structure and relates it to stability conditions during training.
 
 ## 12. Ordering the blocks
@@ -463,8 +514,10 @@ fits. This found the answer in about 13 minutes, and it is still available as
 
 ### A shortcut, found afterwards
 
-With the true order known, it is easy to ask which cheap statistic would have predicted it.
-Spearman correlation with the true position:
+With the true order known, it is easy to ask which cheap statistic would have predicted it. The
+table gives each statistic's Spearman correlation with the true position: the correlation of their
+ranks, +1 if the statistic only ever increases with depth, -1 if it only ever decreases. The
+Frobenius norm of a matrix is the square root of the sum of its squared entries.
 
 | Statistic | Spearman |
 |---|---:|
@@ -480,15 +533,17 @@ Spearman correlation with the true position:
 The `out` layers get steadily larger with depth, plausibly because later blocks write into a
 residual stream that has already grown, and need bigger updates to matter. Sorting by `|W_out|`
 gives an order with only 48 inversions (pairs in the wrong relative order). Swapping neighbours
-whenever that lowers the error then needs 330 evaluations and a few seconds. The biggest outlier is
+whenever that lowers the error then needs 330 evaluations, each a forward pass over 1000 rows that
+takes 20 to 30 milliseconds, so about ten seconds in all. The biggest outlier is
 the very last block, whose `W_out` is smaller than the five before it, so sorting puts it at
 position 42; the swaps walk it to the end. The error then sits around 1e-4 until the last
 misplaced pair, the blocks that belong at positions 3 and 4, trades places, and drops to 1.6e-14 in
 that one move.
 
 The norm idea came from looking at the answer, so it is fair to call it hindsight. The search method
-shows the problem is solvable without it. That said, `|block(x) - x|` on the raw data (0.957) needs
-nothing but the pieces and the inputs, and would have been a reasonable first thing to try.
+shows the problem is solvable without it. Among the statistics above, `|block(x) - x|` on the raw
+data (0.957) needs nothing but the pieces and the inputs, and would have been a reasonable first
+thing to try.
 
 ## 13. Checking the answer
 
@@ -506,9 +561,10 @@ The permutation lists, for each block in order, its `inp` piece then its `out` p
 - The reassembled network in float64 matches `pred` to 1.6e-6 on all 10,000 rows, not just the
   1000 used for the search. Its MSE against `true` is 0.1065, the same as `pred`'s.
 - The `Block` and `LastLayer` classes from the puzzle page, loaded with `torch.load(weights_only=True)`
-  and run in float32, match `pred` to 4.8e-7. The CSV stores `pred` as float32, and the remaining
-  difference is a few float32 rounding steps: the pieces were saved from a GPU, which adds things up
-  in a different order.
+  and run in float32, match `pred` to 4.8e-7. That is closer than the float64 replay because `pred`
+  was itself computed in float32 (the CSV stores it with float32 precision). The remaining gap is a
+  few float32 rounding steps; the pieces were saved from a GPU, so `pred` was most likely computed
+  there, where sums are added up in a different order.
 
 ## 14. Other solvers
 
@@ -525,9 +581,10 @@ The permutation lists, for each block in order, its `inp` piece then its `out` p
 
 ## 15. Things worth knowing before you start your own
 
-- **Never unpickle a model to look at it.** List the `GLOBAL`s first, then read it with
-  placeholders. `torch.load(weights_only=True)` is the safe default for weights; for whole modules,
-  allowlist the classes.
+- **Never unpickle a model to look at it.** Load it with placeholders that record every import,
+  check the tensor layouts against the storage sizes, and only then look inside.
+  `torch.load(weights_only=True)` is the safe default for weights; for whole modules, allowlist the
+  classes, on both of torch's loading paths.
 - **Integer weights mean a circuit.** Once you see powers of two and integer biases, stop thinking
   about features and start thinking about gates. A census of (weights, bias) patterns gives you the
   gate library in seconds.
@@ -535,8 +592,8 @@ The permutation lists, for each block in order, its `inp` piece then its `out` p
   single neuron. Linear probes find quantities spread over several. Use both, and remember that
   equal quantities share a signature.
 - **Use every exact check the puzzle gives you.** A known output column (`pred`) turns ordering into
-  optimisation with a known optimum; a published SHA-256 turns "I think this is right" into "this is
-  right".
+  optimisation with a known optimum, and a published SHA-256 lets you confirm an answer locally.
 - **Simulate exactly, then cross-check.** The numpy simulator here is exact because the values are
   integers, and torch's own forward pass agrees with it at the output and at all 192 comparator
-  inputs. When two independent implementations agree, you can trust the rest of the analysis.
+  inputs, which is good evidence that the analysis built on the simulator describes the real
+  model.

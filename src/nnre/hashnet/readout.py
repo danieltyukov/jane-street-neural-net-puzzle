@@ -64,8 +64,9 @@ def digests(net: HashNet, strings: list[str], cmp: Comparator | None = None) -> 
 def byte_terms(net: HashNet, text: str, cmp: Comparator | None = None) -> list[tuple[int, int]]:
     """Per byte: (sum of the positive-weight inputs, sum of the negative-weight inputs).
 
-    Bytes 4-7 and 12-15 arrive in carry-save form: 8 "sum" positions that can hold 0, 1 or 2, and 8
-    carries weighted -2, -4, ..., -256. The byte is the difference.
+    Bytes 4-7 and 12-15 arrive with their last XOR not yet applied: each bit is s - 2n, where s is
+    a + b (0, 1 or 2) and n is AND(a, b). The comparator's weights apply it, so the byte value is
+    (sum of s_i 2^i) - (sum of 2 n_i 2^i).
     """
     cmp = cmp or comparator(net)
     a = net.activations([text], [net.depth - 3])[net.depth - 3][:, 0]

@@ -119,7 +119,7 @@ def step_readout(ctx: Context) -> dict:
     ok = sum(d == md5.md5(t.encode("latin-1")) for t, d in zip(texts, got))
     terms = readout.byte_terms(ctx.net, "vegetable dog", cmp)
     ctx.say(f"model('vegetable dog') = {out_example:g}; its byte 7 arrives as {terms[7][0]} - {terms[7][1]} = "
-            f"{terms[7][0] - terms[7][1]} (carry-save), MD5 byte 7 is {md5.md5(b'vegetable dog')[7]}")
+            f"{terms[7][0] - terms[7][1]} (XOR applied by the weights), MD5 byte 7 is {md5.md5(b'vegetable dog')[7]}")
     ctx.say(f"value compared against the target equals MD5(input) for {ok}/{len(texts)} random inputs")
     return {"target": cmp.target_hex, "vegetable_dog": out_example, "md5_matches": ok, "inputs": len(texts),
             "vegetable_dog_terms": terms,
@@ -140,13 +140,18 @@ def step_md5map(ctx: Context) -> dict:
     ctx.say(f"all 32 bits of MD5's new word found for {steps_found}/64 steps; "
             f"step i is complete at layer {m['step_done'][0]} + 42*i (period {m['period']})")
     ctx.say(f"round function F/G/H/I output is a set of neurons in {f_found}/{len(f_varying)} steps where it varies")
+    f_offsets = sorted({s["f"].first - probe.step_start(s["step"]) for s in m["steps"] if s["step"] >= 3})
+    b_first = sorted({s["b"].first - probe.step_start(s["step"]) for s in m["steps"] if s["step"] >= 1})
+    b_last = sorted({s["b"].last - probe.step_start(s["step"]) for s in m["steps"]})
+    ctx.say(f"offsets inside a step: F at {f_offsets} (steps 3..63), bit 0 of the new word at {b_first} "
+            f"(steps 1..63), all 32 bits by {b_last}")
+    widths = probe.adder_widths(ctx.net)
+    ctx.say(f"adder windows rise above their floor {widths['floors']} by {widths['rises']} (Kogge-Stone: 32 - 2^k)")
+    anatomy = probe.step_anatomy(ctx.net)
+    for i, a in anatomy.items():
+        ctx.say(f"  step {i:2d}: " + ", ".join(f"{k} {v}/32" for k, v in a.items()))
     ctx.say(f"pre-rotation sum a+f+K+M: at most {most_sum_bits}/32 bits are single neurons, in all "
             f"{len(live)} steps that read a live message word")
-    texts = probe.random_inputs(800, seed=7)
-    start = probe.step_start(5)
-    lin = probe.linear_probe(ctx.net, texts, probe.presum_values(texts, 5), [start + 27, start + 28])
-    ctx.say("linear probe for step 5's pre-rotation sum: "
-            + ", ".join(f"layer {layer} (+{layer - start}): {v['linear_bits']}/32 bits" for layer, v in lin.items()))
     sched = probe.message_schedule(ctx.net)
     splits = probe.byte_splitters(ctx.net)
     per_step = [sum(1 for layer in splits if (layer - 17) // 42 == i - 1) for i in range(64)]
@@ -156,7 +161,9 @@ def step_md5map(ctx: Context) -> dict:
     return {"step_done": m["step_done"], "period": m["period"], "steps_found": steps_found,
             "round_function_found": f_found, "round_function_varying": len(f_varying),
             "live_steps": len(live), "presum_max_single_neuron_bits": most_sum_bits,
-            "linear_probe": {str(k): v for k, v in lin.items()},
+            "f_offsets": f_offsets, "b_first_offsets": b_first, "b_last_offsets": b_last,
+            "adder_rises": widths["rises"], "adder_floors": widths["floors"],
+            "anatomy": {str(k): v for k, v in anatomy.items()}, "signatures": m["signatures"],
             "message_first_layer": {g: v[0] for g, v in sched.items() if v},
             "byte_splitters": len(splits), "splitters_per_step": sorted(set(per_step)),
             "ok": steps_found == 64 and m["period"] == [42]}
@@ -190,7 +197,7 @@ def step_crack(ctx: Context) -> dict:
             f"guesses ({r.words} wordfreq words, shell {r.shell}) in {r.seconds:.1f}s")
     ctx.say(f"model('{r.phrase}') = {out[0]:g}; capitalised {out[1]:g}; trailing space {out[2]:g}")
     return {"answer": r.phrase, "hashes": r.hashes, "shell": r.shell, "network_output": float(out[0]),
-            "ok": out[0] == 1.0 and out[1] == 0.0}
+            "ok": bool(out[0] == 1.0 and out[1] == 0.0)}
 
 
 # -- puzzle 2 ------------------------------------------------------------------------------------

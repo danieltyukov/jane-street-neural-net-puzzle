@@ -94,17 +94,20 @@ def md5_map(ctx) -> Path:
     ax2.set_ylim(200, top)
     ax2.set_xlabel(f"layer offset inside one step (step {i} starts at layer {start})")
     ax2.set_ylabel("neurons in layer")
-    ax2.set_title("One step: round function, combine the operands, then two Kogge-Stone carry adders")
-    phases = [(0, 3, "F/G/H/I\nat +2"), (3, 16, "combine a, f, K, M"),
-              (16, 28, "adder 1: a+f+K+M\nready at +28"), (28, 42, "adder 2: b + rotl(sum)\nnew b at +42")]
+    ax2.set_title("One step: F, two additions side by side, then two Kogge-Stone adders")
+    phases = [(0, 3, "F/G/H/I\nat +2"), (3, 16, "a + f and M + K\nside by side"),
+              (16, 29, "adder 1: (a+f) + (M+K)\nsum ready at +28"), (29, 42, "adder 2: b + rotl(sum)\nnew b at +42")]
     for k, (a, b, label) in enumerate(phases):
         if k % 2:
             ax2.axvspan(a, b, color="#f0efec", zorder=0, lw=0)
         ax2.text((a + b) / 2, top - 6, label, ha="center", va="top", fontsize=8.5, color=INK_2)
-    for x in xs:
-        if widths[x] in (319, 318, 316, 312, 304):
-            ax2.annotate(f"{widths[x]}", (x - start, widths[x]), textcoords="offset points", xytext=(0, 4),
-                         ha="center", fontsize=7, color=INK_2)
+    for lo, hi in ((16, 29), (29, 42)):  # label how far each adder layer rises above the window floor
+        w = [int(widths[start + o]) for o in range(lo, hi)]
+        floor = max(set(w), key=w.count)
+        for o, x in zip(range(lo, hi), w):
+            if x > floor:
+                ax2.annotate(f"+{x - floor}", (o, x), textcoords="offset points", xytext=(0, 4),
+                             ha="center", fontsize=7, color=INK_2)
     ax2.grid(axis="x", visible=False)
     fig.tight_layout()
     return _save(fig, "md5_map.png")
@@ -243,7 +246,7 @@ def ordering(ctx) -> Path:
     ax2.set_xlabel("model evaluations")
     ax2.set_ylabel("mean (model - pred)^2")
     ax2.set_title("Sorted by norm, then neighbour swaps")
-    ax2.annotate(f"exact: {hist[-1, 1]:.0e}", (hist[-1, 0], hist[-1, 1]), xytext=(-110, 30),
+    ax2.annotate(f"exact: {hist[-1, 1]:.1e}", (hist[-1, 0], hist[-1, 1]), xytext=(-120, 30),
                  textcoords="offset points", fontsize=8.5, color=INK_2,
                  arrowprops=dict(arrowstyle="-", color=MUTED, lw=0.8))
     fig.tight_layout()
