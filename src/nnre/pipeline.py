@@ -235,7 +235,7 @@ def step_order(ctx: Context) -> dict:
 @_timed
 def step_crosscheck(ctx: Context) -> dict:
     if not crosscheck.torch_available():
-        ctx.say("torch not installed; skipped (pip install -e '.[torch]')")
+        ctx.say("torch not installed; skipped (`make torch` installs the CPU build)")
         return {"skipped": True}
     texts = ["vegetable dog", ctx.answer1.phrase or "", "Bitter lesson"] + probe.random_inputs(61, 11, 55)
     h = crosscheck.hashnet(ctx.net, texts)
