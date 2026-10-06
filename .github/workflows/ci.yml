@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Cache the puzzle files
+        uses: actions/cache@v6
+        with:
+          path: data
+          key: puzzles-${{ hashFiles('src/nnre/fetch.py') }}
+
+      - name: Set up
+        run: make setup torch
+
+      - name: Download the puzzles
+        run: make fetch
+
+      - name: Tests
+        run: make test
+
+      - name: Full solve
+        run: make all
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: results
+          path: |
+            build/results.json
+            build/results.log

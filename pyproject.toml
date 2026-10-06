@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nnre"
+version = "1.0.0"
+description = "Reverse-engineering toolkit and full solutions for Jane Street's two neural network puzzles"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Daniel Tyukov" }]
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "matplotlib>=3.7",
+  "wordfreq>=3.0",
+]
+
+[project.optional-dependencies]
+# Only for the cross-checks against the real PyTorch modules; nothing else imports torch.
+torch = ["torch>=2.0"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+nnre = "nnre.cli:main"
+
+[project.urls]
+"Puzzle 1" = "https://huggingface.co/spaces/jane-street/puzzle"
+"Puzzle 2" = "https://huggingface.co/spaces/jane-street/droppedaneuralnet"
+"Jane Street write-up" = "https://blog.janestreet.com/can-you-reverse-engineer-our-neural-network/"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
