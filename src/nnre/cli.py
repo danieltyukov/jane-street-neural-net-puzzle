@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         ctx.say(f"\n== {name}: {HELP[name]}")
         out = pipeline.STEPS[name](ctx)
         results[name] = out
-        if out.get("ok") is False:
+        if not out.get("ok", True):
             failed.append(name)
     if args.step == "all":
         ctx.build.mkdir(parents=True, exist_ok=True)

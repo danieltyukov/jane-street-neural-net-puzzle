@@ -5,7 +5,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+# A source checkout (or editable install) keeps data/ and build/ next to the code. A regular
+# `pip install` puts the package in site-packages, so fall back to the current directory there.
+_SOURCE = Path(__file__).resolve().parents[2]
+ROOT = _SOURCE if (_SOURCE / "pyproject.toml").exists() else Path.cwd()
 DATA = Path(os.environ.get("NNRE_DATA", ROOT / "data"))
 BUILD = Path(os.environ.get("NNRE_BUILD", ROOT / "build"))
 
