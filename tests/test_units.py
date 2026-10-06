@@ -110,6 +110,26 @@ def test_inert_unpickler_never_runs_code(tmp_path, monkeypatch):
     assert not (tmp_path / "nnre_pwned").exists()
 
 
+def test_globals_include_inst_opcodes(tmp_path, monkeypatch):
+    # INST imports and calls in one opcode, with no GLOBAL anywhere in the stream
+    monkeypatch.chdir(tmp_path)
+    payload = b"(S'touch nnre_pwned'\nios\nsystem\n."
+    assert torchzip.referenced_globals(payload) == {"os.system": 1}
+    assert not (tmp_path / "nnre_pwned").exists()
+
+
+def test_restricted_torch_pickle_refuses_unknown_globals(tmp_path, monkeypatch):
+    # torch calls pickle_module.load directly for legacy (non-zip) files, so it must be restricted too
+    from nnre import crosscheck
+    monkeypatch.chdir(tmp_path)
+    payload = pickle.dumps(_Evil(), protocol=2)
+    with pytest.raises(pickle.UnpicklingError):
+        crosscheck.restricted_pickle.load(io.BytesIO(payload))
+    with pytest.raises(pickle.UnpicklingError):
+        crosscheck.restricted_pickle.Unpickler(io.BytesIO(payload)).load()
+    assert not (tmp_path / "nnre_pwned").exists()
+
+
 def _fake_torch_file(path, arrays: dict[str, np.ndarray]):
     """A minimal torch.save-style zip with a hand-assembled protocol 2 pickle.
 
@@ -152,6 +172,19 @@ def test_tensor_reader_round_trip(tmp_path):
 
 
 # -- puzzle 2 on a synthetic network -------------------------------------------------------------
+
+def test_tensor_reader_rejects_layouts_outside_the_storage(tmp_path):
+    path = tmp_path / "evil.pth"
+    _fake_torch_file(path, {"weight": np.zeros(3, dtype=np.float32)})
+    arc = torchzip.TorchArchive.open(path)
+    g = arc.graph()
+    t = g["weight"]
+    (pid, offset, size, stride) = t.args[:4]
+    for bad in [(pid, 0, (4096,), (1,)), (pid, 5, (1,), (1,)), (pid, -1, (2,), (1,)), (pid, 0, (2,), (-1,))]:
+        t.args = bad
+        with pytest.raises(ValueError):
+            arc.tensor(t)
+
 
 def _synthetic(n_blocks=5, dim=6, hidden=12, rows=400, seed=0):
     rng = np.random.default_rng(seed)

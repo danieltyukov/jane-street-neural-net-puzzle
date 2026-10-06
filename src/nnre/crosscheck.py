@@ -55,8 +55,12 @@ class _AllowlistUnpickler(pickle.Unpickler):
         return super().find_class(module, name)
 
 
-restricted_pickle = types.SimpleNamespace(Unpickler=_AllowlistUnpickler, load=pickle.load,
-                                          __name__="restricted_pickle")
+# torch uses .Unpickler for zip archives and .load for the legacy (pre-1.6, non-zip) format, so both
+# must go through the allowlist; handing it the real pickle.load would reopen the hole on old files.
+restricted_pickle = types.SimpleNamespace(
+    Unpickler=_AllowlistUnpickler,
+    load=lambda f, **kwargs: _AllowlistUnpickler(f, **kwargs).load(),
+    __name__="restricted_pickle")
 
 
 def torch_available() -> bool:
@@ -69,11 +73,17 @@ def torch_available() -> bool:
 
 def hashnet(net, texts: list[str]) -> dict:
     import torch
+
+    from . import fetch
+
+    path = paths.require(paths.MODEL_PT)
+    # Only ever hand torch the exact file Jane Street published. torch routes some archive layouts
+    # (TorchScript, legacy formats) away from the unpickler we pass, so the hash check comes first.
+    if fetch.sha256_of(path) != fetch.MODEL.sha256:
+        raise SystemExit(f"{path} is not the published model.pt (SHA-256 mismatch); refusing to load it")
     # weights_only=False is needed because the file holds nn.Module objects, not only tensors.
-    # It is safe here because every class goes through _AllowlistUnpickler, and fetch.py has
-    # already checked the file against its pinned SHA-256.
-    model = torch.load(paths.require(paths.MODEL_PT), map_location="cpu", weights_only=False,
-                       pickle_module=restricted_pickle)
+    # Every class still goes through _AllowlistUnpickler.
+    model = torch.load(path, map_location="cpu", weights_only=False, pickle_module=restricted_pickle)
     model.eval()
     x = torch.tensor(net.encode(texts).T, dtype=torch.float32)
     with torch.no_grad():
@@ -86,7 +96,8 @@ def hashnet(net, texts: list[str]) -> dict:
             h = layer(h)
     mid_ref = h.numpy().T.astype(np.float64)
     mid_ours = net.activations(texts, [net.depth - 3])[net.depth - 3]
-    return {"inputs": len(texts), "outputs_equal": bool(np.array_equal(ref, ours)),
+    return {"inputs": len(texts), "comparator_width": int(mid_ref.shape[0]),
+            "outputs_equal": bool(np.array_equal(ref, ours)),
             "comparator_inputs_equal": bool(np.array_equal(mid_ref, mid_ours)),
             "torch_outputs": {t: float(v) for t, v in zip(texts, ref) if v != 0}}
 

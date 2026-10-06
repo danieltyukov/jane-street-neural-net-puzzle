@@ -14,7 +14,6 @@ import codecs
 import collections
 import io
 import pickle
-import pickletools
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,7 +69,16 @@ def stub_class(module: str, name: str) -> type:
 
 
 class InertUnpickler(pickle.Unpickler):
+    """Every import goes through find_class (GLOBAL, STACK_GLOBAL, INST and EXT opcodes alike), so
+    returning placeholders here is enough to make loading inert, and recording the names here gives
+    the complete list of what the file asks for."""
+
+    def __init__(self, file):
+        super().__init__(file)
+        self.requested: collections.Counter = collections.Counter()
+
     def find_class(self, module, name):
+        self.requested[f"{module}.{name}"] += 1
         return _REAL.get((module, name)) or stub_class(module, name)
 
     def persistent_load(self, pid):
@@ -79,22 +87,15 @@ class InertUnpickler(pickle.Unpickler):
 
 
 def referenced_globals(pkl: bytes) -> collections.Counter:
-    """Every ``module.name`` the pickle would import, read from the opcode stream without unpickling."""
-    found: collections.Counter = collections.Counter()
-    strings: list[str] = []
-    memo: dict[int, str] = {}
-    for op, arg, _ in pickletools.genops(pkl):
-        if op.name == "GLOBAL":
-            found[arg.replace(" ", ".")] += 1
-        elif op.name in ("SHORT_BINUNICODE", "BINUNICODE", "UNICODE", "BINUNICODE8"):
-            strings.append(arg)
-        elif op.name == "MEMOIZE" and strings:
-            memo[len(memo)] = strings[-1]
-        elif op.name in ("BINGET", "LONG_BINGET", "GET") and arg in memo:
-            strings.append(memo[arg])
-        elif op.name == "STACK_GLOBAL" and len(strings) >= 2:
-            found[f"{strings[-2]}.{strings[-1]}"] += 1
-    return found
+    """Every ``module.name`` the pickle asks for, collected by an inert load (nothing is imported).
+
+    ``python -m pickletools`` shows the same names as GLOBAL / STACK_GLOBAL / INST opcodes, but
+    working them out from the opcode stream alone means tracking the memo and the stack; asking the
+    unpickler itself cannot miss one.
+    """
+    u = InertUnpickler(io.BytesIO(pkl))
+    u.load()
+    return u.requested
 
 
 @dataclass
@@ -129,8 +130,17 @@ class TorchArchive:
         (_, storage_type, key, _location, _numel), offset, size, stride = rebuilt.args[:4]
         dtype = {"FloatStorage": "<f4", "DoubleStorage": "<f8", "LongStorage": "<i8",
                  "IntStorage": "<i4"}[storage_type.qualname.rsplit(".", 1)[1]]
-        buf = np.frombuffer(self.zf.read(f"{self.prefix}/data/{key}"), dtype=dtype)
+        buf = np.frombuffer(self.zf.read(f"{self.prefix}/data/{key!s}"), dtype=dtype)
+        size, stride = tuple(int(n) for n in size), tuple(int(s) for s in stride)
+        # Offset, shape and stride come from the file. as_strided does no bounds checking, so a
+        # crafted file could make it read past the storage; check the last element is inside.
+        if int(offset) < 0 or any(n < 0 for n in size) or any(s < 0 for s in stride) or len(size) != len(stride):
+            raise ValueError(f"bad tensor layout: offset {offset}, size {size}, stride {stride}")
+        if all(n > 0 for n in size):
+            last = int(offset) + sum((n - 1) * s for n, s in zip(size, stride))
+            if last >= buf.size:
+                raise ValueError(f"tensor layout reaches element {last}, storage has {buf.size}")
         item = buf.itemsize
-        view = np.lib.stride_tricks.as_strided(buf[offset:], shape=tuple(size),
-                                               strides=tuple(s * item for s in stride))
+        view = np.lib.stride_tricks.as_strided(buf[int(offset):], shape=size,
+                                               strides=tuple(s * item for s in stride), writeable=False)
         return np.array(view)
